@@ -1,0 +1,3 @@
+roll:INT:PK
+name:STR:
+age:INT:

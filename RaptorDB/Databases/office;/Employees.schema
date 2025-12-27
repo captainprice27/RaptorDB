@@ -1,0 +1,5 @@
+id:INT:PK
+name:STR:
+salary:LONG:
+joining:DATE:
+last_login:DATETIME:
