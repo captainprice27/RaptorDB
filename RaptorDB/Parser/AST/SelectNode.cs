@@ -1,19 +1,18 @@
-﻿namespace RaptorDB.RaptorDB.Parser.AST
+﻿using System.Collections.Generic;
+
+namespace RaptorDB.RaptorDB.Parser.AST
 {
-    /// <summary>
-    /// Represents: GET table WHERE column = value
-    /// </summary>
     internal class SelectNode : AstNode
     {
         public string TableName { get; }
-        public string Column { get; }
-        public string Value { get; }
+        public List<string> Columns { get; }
+        public List<Condition> Conditions { get; } // Supports multiple filters
 
-        public SelectNode(string tableName, string column, string value)
+        public SelectNode(string tableName, List<string> columns, List<Condition> conditions)
         {
             TableName = tableName;
-            Column = column;
-            Value = value;
+            Columns = columns ?? new List<string>();
+            Conditions = conditions ?? new List<Condition>();
         }
     }
 }

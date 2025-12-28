@@ -1,19 +1,16 @@
-﻿namespace RaptorDB.RaptorDB.Parser.AST
+﻿using System.Collections.Generic;
+
+namespace RaptorDB.RaptorDB.Parser.AST
 {
-    /// <summary>
-    /// Represents: DELETE table WHERE column = value
-    /// </summary>
     internal class DeleteNode : AstNode
     {
         public string TableName { get; }
-        public string Column { get; }
-        public string Value { get; }
+        public List<Condition> Conditions { get; }
 
-        public DeleteNode(string tableName, string column, string value)
+        public DeleteNode(string tableName, List<Condition> conditions)
         {
             TableName = tableName;
-            Column = column;
-            Value = value;
+            Conditions = conditions ?? new List<Condition>();
         }
     }
 }
