@@ -1,20 +1,17 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Text;
 
 namespace RaptorDB.RaptorDB.Parser
 {
     internal class Lexer
     {
-        private string _input;
+        private readonly string _input;
         private int _position = 0;
 
         public Lexer(string input)
         {
-            // Normalize weird user input patterns
-            _input = input
-                .Replace("SELECT*", "SELECT *")
-                .Replace("select*", "select *")
-                .Trim();
+            _input = input.Trim();
         }
 
         public List<string> Tokenize()
@@ -25,102 +22,103 @@ namespace RaptorDB.RaptorDB.Parser
             {
                 char current = _input[_position];
 
-                // Ignore whitespace
                 if (char.IsWhiteSpace(current))
                 {
                     _position++;
                     continue;
                 }
 
-                // Ignore semicolons → ensures "school;" becomes "school"
                 if (current == ';')
                 {
                     _position++;
                     continue;
                 }
 
-                // Identifiers/table/columns/keywords
-                if (char.IsLetter(current))
+                // --- HANDLE OPERATORS (>=, <=, !=, <, >, =) ---
+                if ("=<>!".Contains(current))
                 {
-                    tokens.Add(ReadIdentifier().ToLower().TrimEnd(';'));
+                    // Check for 2-char operators
+                    if (_position + 1 < _input.Length && _input[_position + 1] == '=')
+                    {
+                        tokens.Add(current.ToString() + "="); // >=, <=, !=, ==
+                        _position += 2;
+                    }
+                    else
+                    {
+                        tokens.Add(current.ToString()); // <, >, =
+                        _position++;
+                    }
                     continue;
                 }
 
-                // Numbers / Dates / DateTime
-                if (char.IsDigit(current))
-                {
-                    tokens.Add(ReadDateOrNumber().TrimEnd(';'));
-                    continue;
-                }
-
-                // Strings "Aman" or 'Aman'
-                if (current == '"' || current == '\'')
-                {
-                    tokens.Add(ReadQuoted().TrimEnd(';'));
-                    continue;
-                }
-
-                // Symbols
-                if ("(),=+-*".Contains(current))
+                if ("(),+-*".Contains(current))
                 {
                     tokens.Add(current.ToString());
                     _position++;
                     continue;
                 }
 
-                _position++; // fallback skip
+                if (char.IsLetter(current) || current == '_')
+                {
+                    tokens.Add(ReadIdentifier());
+                    continue;
+                }
+
+                if (char.IsDigit(current))
+                {
+                    tokens.Add(ReadNumberOrDate());
+                    continue;
+                }
+
+                if (current == '\'' || current == '"')
+                {
+                    tokens.Add(ReadQuoted());
+                    continue;
+                }
+
+                _position++;
             }
 
             return tokens;
         }
-
-        // ----------------------------------------------------------------------
-        // HELPERS
-        // ----------------------------------------------------------------------
 
         private string ReadIdentifier()
         {
             int start = _position;
             while (_position < _input.Length &&
                   (char.IsLetterOrDigit(_input[_position]) || _input[_position] == '_'))
+            {
                 _position++;
-
-            return _input.Substring(start, _position - start).Trim();
+            }
+            return _input.Substring(start, _position - start);
         }
 
-        private string ReadDateOrNumber()
+        private string ReadNumberOrDate()
         {
             int start = _position;
-
             while (_position < _input.Length)
             {
                 char c = _input[_position];
-
-                // Accept digits and date/time chars
-                if (char.IsDigit(c) || c == '-' || c == ':' || c == '.' || c == 'T' || c == ' ')
-                {
+                if (char.IsDigit(c) || c == '.' || c == ':' || c == '-' || c == 'T')
                     _position++;
-                    continue;
-                }
-
-                break;
+                else
+                    break;
             }
-
-            return _input.Substring(start, _position - start).Trim();
+            return _input.Substring(start, _position - start);
         }
 
         private string ReadQuoted()
         {
             char quote = _input[_position++];
-            int start = _position;
-
-            while (_position < _input.Length && _input[_position] != quote)
+            StringBuilder sb = new StringBuilder();
+            while (_position < _input.Length)
+            {
+                char c = _input[_position];
+                if (c == quote) { _position++; break; }
+                sb.Append(c);
                 _position++;
-
-            string val = _input.Substring(start, _position - start);
-            _position++;
-
-            return val.Trim();
+            }
+            return sb.ToString();
         }
     }
 }
