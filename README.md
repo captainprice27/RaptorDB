@@ -1,7 +1,7 @@
 # 🦖 RaptorDB
 
-> **Version 1.1** — A commercial-grade, custom relational database engine built from scratch in C#.  
-> Locked and Loaded. © 2025–2026 Prayas ([@captainprice27](https://github.com/captainprice27))
+> **Version 1.3** : A educational custom relational database engine built from scratch in C#.  
+> Locked and Loaded just like a F22 raptor🦖. © 2025–2026 Prayas ([@captainprice27](https://github.com/captainprice27))
 
 RaptorDB is a lightweight **Relational Database Management System (RDBMS)** designed to demonstrate advanced storage engine concepts. It features a custom SQL parser, a disk-based B+ Tree indexing engine, and an interactive REPL shell — all built **without any external database dependencies**.
 
@@ -528,7 +528,7 @@ When set, the engine prints:
 
 ---
 
-## 🔮 Future Scope (v2.0)
+## 🔮 Future Scope (v2.x)
 
 | Feature | Description | Status |
 |---|---|---|
@@ -549,7 +549,7 @@ When set, the engine prints:
 
 ## 🤝 Contributing
 
-Contributions are welcome! Please fork the repository and create a Pull Request for review.
+Contributions are most welcome! Please please fork the repo and create a Pull Request for review.
 
 ```bash
 # 1. Fork the project on GitHub
