@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -14,8 +14,11 @@ namespace RaptorDB.RaptorDB.Storage
         private string BasePath => _engine.GetActiveDbPath();
 
         // Normalize identifiers: remove semicolons, trim, lowercase
-        private string Normalize(string name) =>
-            name?.Trim().TrimEnd(';').ToLower();
+        private static string Normalize(string? name)
+        {
+            ArgumentNullException.ThrowIfNull(name);
+            return name.Trim().TrimEnd(';').ToLower();
+        }
 
         public SchemaManager(DBEngine engine)
         {
@@ -74,7 +77,8 @@ namespace RaptorDB.RaptorDB.Storage
 
             foreach (var line in File.ReadAllLines(schemaFile))
             {
-                var p = line.Split(':');
+                // Split(char, int) — .NET 5+ overload avoids allocating extra empty entries.
+                var p = line.Split(':', 3);
                 if (p.Length < 2)
                     throw new Exception("SCHEMA PARSE ERROR: Invalid schema format.");
 

@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using RaptorDB.RaptorDB.Parser.AST;
@@ -16,7 +16,11 @@ namespace RaptorDB.RaptorDB.Core
         private readonly IndexManager _index;
         private readonly WALManager _wal;
 
-        private string Normalize(string name) => name?.Trim().TrimEnd(';').ToLower();
+        private static string Normalize(string? name)
+        {
+            ArgumentNullException.ThrowIfNull(name);
+            return name.Trim().TrimEnd(';').ToLower();
+        }
 
         public ExecutionEngine(DBEngine engine)
         {

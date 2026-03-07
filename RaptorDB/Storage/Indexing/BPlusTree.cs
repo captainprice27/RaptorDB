@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Linq;
 using System.Collections.Generic;
 
@@ -27,7 +27,7 @@ namespace RaptorDB.RaptorDB.Storage.Indexing
         }
 
         // --- FIX: Returns true/false so we don't confuse "Offset 0" with "Not Found" ---
-        public bool TryFind(TKey key, out TValue value)
+        public bool TryFind(TKey key, out TValue? value)
         {
             var node = _disk.ReadNode(_rootPageId);
 
@@ -81,7 +81,7 @@ namespace RaptorDB.RaptorDB.Storage.Indexing
         }
 
         // Helper to expose simple lookup for IndexManager
-        public TValue Search(TKey key)
+        public TValue? Search(TKey key)
         {
             if (TryFind(key, out var val)) return val;
 

@@ -1,9 +1,14 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using RaptorDB.RaptorDB.Parser.AST;
 
 namespace RaptorDB.RaptorDB.Parser
 {
+    /// <summary>
+    /// Recursive-descent parser. Converts a flat token list from the Lexer into a typed AST node.
+    /// Updated for .NET 10: all Pop() call-sites are guarded via Require() so the nullable
+    /// flow analysis is satisfied without suppression operators.
+    /// </summary>
     internal class Parser
     {
         private readonly List<string> _tokens;
@@ -11,8 +16,29 @@ namespace RaptorDB.RaptorDB.Parser
 
         public Parser(List<string> tokens) => _tokens = tokens;
 
-        private string Peek() => _pos < _tokens.Count ? _tokens[_pos] : null;
-        private string Pop() => _pos < _tokens.Count ? _tokens[_pos++] : null;
+        // ---------------------------------------------------------------
+        // CORE TOKEN HELPERS
+        // ---------------------------------------------------------------
+
+        /// <summary>Peeks at the next token without consuming it. Returns null at end-of-stream.</summary>
+        private string? Peek() => _pos < _tokens.Count ? _tokens[_pos] : null;
+
+        /// <summary>Consumes and returns the next token. Returns null at end-of-stream.</summary>
+        private string? Pop() => _pos < _tokens.Count ? _tokens[_pos++] : null;
+
+        /// <summary>
+        /// Consumes the next token and throws a descriptive parse error if the stream is exhausted.
+        /// Use this instead of Pop() whenever a token is required.
+        /// </summary>
+        private string Require(string context)
+        {
+            string? tok = Pop();
+            if (tok is null)
+                throw new Exception($"Syntax error: unexpected end of input (expected {context})");
+            return tok;
+        }
+
+        private static string StripSemicolon(string v) => v.TrimEnd(';');
 
         private bool Match(string keyword)
         {
@@ -27,52 +53,50 @@ namespace RaptorDB.RaptorDB.Parser
         private void Expect(string token)
         {
             if (!Match(token))
-                throw new Exception($"Syntax error: expected '{token}', got '{Peek()}'");
+                throw new Exception($"Syntax error: expected '{token}', got '{Peek() ?? "<end>"}'");
         }
 
-        private string StripSemicolon(string v) => v?.TrimEnd(';');
+        // ---------------------------------------------------------------
+        // OPERATOR HELPERS
+        // ---------------------------------------------------------------
 
-        // --- OPERATOR PARSING ---
-        private bool IsOperator(string token)
-            => token == "=" || token == "==" || token == ">" || token == "<" ||
-               token == ">=" || token == "<=" || token == "!=";
+        private static bool IsOperator(string? token)
+            => token is "=" or "==" or ">" or "<" or ">=" or "<=" or "!=";
 
         private string ParseOperator()
         {
-            string op = Peek();
+            string? op = Peek();
             if (IsOperator(op))
             {
                 Pop();
-                if (op == "==") return "=";
-                return op;
+                return op == "==" ? "=" : op!;
             }
-            throw new Exception($"Syntax error: expected operator, got '{op}'");
+            throw new Exception($"Syntax error: expected operator, got '{op ?? "<end>"}'");
         }
 
-        // --- WHERE CLAUSE PARSER (Supports AND, BETWEEN) ---
+        // ---------------------------------------------------------------
+        // WHERE CLAUSE  (supports AND, BETWEEN, shorthand AND <op>)
+        // ---------------------------------------------------------------
+
         private List<Condition> ParseWhereClause()
         {
             var conditions = new List<Condition>();
 
-            // 1. Parse first condition: "age > 10"
-            string activeCol = Pop();
+            string activeCol = Require("column name");
             ParseConditionForColumn(activeCol, conditions);
 
-            // 2. Loop for "AND"
             while (Match("and"))
             {
-                string next = Peek();
+                string? next = Peek();
 
-                // FEATURE: Shorthand support ("age > 10 AND < 20")
-                if (IsOperator(next) || next.Equals("between", StringComparison.OrdinalIgnoreCase))
+                // Shorthand: "gpa > 3.0 AND < 4.0" — reuse previous column
+                if (IsOperator(next) || string.Equals(next, "between", StringComparison.OrdinalIgnoreCase))
                 {
-                    // Reuse the active column
                     ParseConditionForColumn(activeCol, conditions);
                 }
                 else
                 {
-                    // New column ("AND salary > 5000")
-                    activeCol = Pop();
+                    activeCol = Require("column name");
                     ParseConditionForColumn(activeCol, conditions);
                 }
             }
@@ -83,60 +107,77 @@ namespace RaptorDB.RaptorDB.Parser
         {
             if (Match("between"))
             {
-                // "age BETWEEN 10 AND 20" -> "age >= 10" AND "age <= 20"
-                string lower = StripSemicolon(Pop());
+                // "age BETWEEN 10 AND 20"  →  age >= 10 AND age <= 20
+                string lower = StripSemicolon(Require("lower bound"));
                 Expect("and");
-                string upper = StripSemicolon(Pop());
-
+                string upper = StripSemicolon(Require("upper bound"));
                 list.Add(new Condition(col, ">=", lower));
                 list.Add(new Condition(col, "<=", upper));
             }
             else
             {
-                string op = ParseOperator();
-                string val = StripSemicolon(Pop());
+                string op  = ParseOperator();
+                string val = StripSemicolon(Require("value"));
                 list.Add(new Condition(col, op, val));
             }
         }
 
-        // --- ENTRY POINT ---
+        // ---------------------------------------------------------------
+        // ENTRY POINT
+        // ---------------------------------------------------------------
+
         public AstNode Parse()
         {
+            // Skip any stray leading semicolons
             while (Peek() == ";") Pop();
 
-            if (Match("list")) { Expect("tables"); return new ListTablesNode(); }
+            if (Match("list"))    { Expect("tables");   return new ListTablesNode(); }
             if (Match("current")) { Expect("database"); return new CurrentDatabaseNode(); }
 
             if (Match("create"))
             {
-                if (Match("database")) return new CreateDatabaseNode(StripSemicolon(Pop()));
-                if (Match("table")) return ParseCreateTable();
-            }
-            if (Match("drop"))
-            {
-                if (Match("database")) return new DropDatabaseNode(StripSemicolon(Pop()));
-                if (Match("table")) return new DropTableNode(StripSemicolon(Pop()));
+                if (Match("database")) return new CreateDatabaseNode(StripSemicolon(Require("database name")));
+                if (Match("table"))    return ParseCreateTable();
             }
 
-            if (Match("use")) return new UseDatabaseNode(StripSemicolon(Pop()));
+            if (Match("drop"))
+            {
+                if (Match("database")) return new DropDatabaseNode(StripSemicolon(Require("database name")));
+                if (Match("table"))    return new DropTableNode(StripSemicolon(Require("table name")));
+            }
+
+            if (Match("use"))    return new UseDatabaseNode(StripSemicolon(Require("database name")));
             if (Match("insert")) return ParseInsert();
             if (Match("select")) return ParseSelect();
             if (Match("delete")) return ParseDelete();
             if (Match("update")) return ParseUpdate();
 
-            throw new Exception($"Syntax error near '{Peek()}'");
+            throw new Exception($"Syntax error near '{Peek() ?? "<end>"}'");
         }
+
+        // ---------------------------------------------------------------
+        // STATEMENT PARSERS
+        // ---------------------------------------------------------------
 
         private SelectNode ParseSelect()
         {
             var cols = new List<string>();
-            if (Match("*")) { /* empty list = * */ }
-            else { cols.Add(StripSemicolon(Pop())); }
+
+            if (Match("*"))
+            {
+                // empty list = SELECT *
+            }
+            else
+            {
+                cols.Add(StripSemicolon(Require("column name")));
+                // Consume additional comma-separated columns: SELECT a, b, c FROM ...
+                while (Match(","))
+                    cols.Add(StripSemicolon(Require("column name")));
+            }
 
             Expect("from");
-            string table = StripSemicolon(Pop());
-            var conditions = new List<Condition>();
-
+            string table     = StripSemicolon(Require("table name"));
+            var    conditions = new List<Condition>();
             if (Match("where")) conditions = ParseWhereClause();
 
             return new SelectNode(table, cols, conditions);
@@ -145,9 +186,8 @@ namespace RaptorDB.RaptorDB.Parser
         private DeleteNode ParseDelete()
         {
             Expect("from");
-            string table = StripSemicolon(Pop());
-            var conditions = new List<Condition>();
-
+            string table     = StripSemicolon(Require("table name"));
+            var    conditions = new List<Condition>();
             if (Match("where")) conditions = ParseWhereClause();
 
             return new DeleteNode(table, conditions);
@@ -155,30 +195,29 @@ namespace RaptorDB.RaptorDB.Parser
 
         private UpdateNode ParseUpdate()
         {
-            string table = StripSemicolon(Pop());
+            string table  = StripSemicolon(Require("table name"));
             Expect("set");
-            string setCol = Pop();
+            string setCol = Require("column name");
             Expect("=");
-            string setVal = StripSemicolon(Pop());
+            string setVal = StripSemicolon(Require("value"));
 
             var conditions = new List<Condition>();
-
             if (Match("where")) conditions = ParseWhereClause();
 
             return new UpdateNode(table, setCol, setVal, conditions);
         }
 
-        // ... Existing CreateTable / Insert ...
         private CreateTableNode ParseCreateTable()
         {
-            string table = StripSemicolon(Pop());
+            string table = StripSemicolon(Require("table name"));
             Expect("(");
+
             var cols = new List<(string, string, bool)>();
             while (true)
             {
-                string col = Pop();
-                string type = Pop();
-                bool pk = Match("pk");
+                string col  = Require("column name");
+                string type = Require("column type");
+                bool   pk   = Match("pk");
                 cols.Add((col, type.ToUpper(), pk));
                 if (Match(")")) break;
                 Expect(",");
@@ -189,14 +228,16 @@ namespace RaptorDB.RaptorDB.Parser
         private InsertNode ParseInsert()
         {
             Expect("into");
-            string table = StripSemicolon(Pop());
+            string table = StripSemicolon(Require("table name"));
             Expect("(");
             var cols = new List<string>();
-            while (!Match(")")) { cols.Add(Pop()); Match(","); }
+            while (!Match(")")) { cols.Add(Require("column name")); Match(","); }
+
             Expect("values");
             Expect("(");
             var vals = new List<string>();
-            while (!Match(")")) { vals.Add(Pop()); Match(","); }
+            while (!Match(")")) { vals.Add(Require("value")); Match(","); }
+
             return new InsertNode(table, cols, vals);
         }
     }

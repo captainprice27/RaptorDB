@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -12,8 +12,11 @@ namespace RaptorDB.RaptorDB.Storage
         private readonly DBEngine _engine;
         private string BasePath => _engine.GetActiveDbPath();
 
-        private string Normalize(string name) =>
-            name?.Trim().TrimEnd(';').ToLower();
+        private static string Normalize(string? name)
+        {
+            ArgumentNullException.ThrowIfNull(name);
+            return name.Trim().TrimEnd(';').ToLower();
+        }
 
         public RecordManager(DBEngine engine)
         {
@@ -77,8 +80,8 @@ namespace RaptorDB.RaptorDB.Storage
             fs.Seek(offset, SeekOrigin.Begin);
 
             using var reader = new StreamReader(fs);
-            string line = reader.ReadLine();
-
+            string? line = reader.ReadLine();
+            if (line is null) throw new Exception("Unexpected end of file reading record.");
             return ByteSerializer.DeserializeRow(line);
         }
 

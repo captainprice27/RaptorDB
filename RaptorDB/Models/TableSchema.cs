@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using RaptorDB.RaptorDB.Utils;
@@ -7,11 +7,14 @@ namespace RaptorDB.RaptorDB.Models
 {
     internal class TableSchema
     {
-        public string TableName { get; set; }
-        public List<ColumnDefinition> Columns { get; set; } = new();
+        public required string TableName { get; set; }
+        public List<ColumnDefinition> Columns { get; set; } = [];
 
-        public TableSchema() { }
+        // Parameterless constructor retained for potential future deserialization use.
+        [System.Diagnostics.CodeAnalysis.SetsRequiredMembers]
+        public TableSchema() { TableName = string.Empty; }
 
+        [System.Diagnostics.CodeAnalysis.SetsRequiredMembers]
         public TableSchema(string name, List<ColumnDefinition> columns)
         {
             TableName = name;

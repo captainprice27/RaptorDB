@@ -1,15 +1,9 @@
-﻿using RaptorDB.RaptorDB.Core;
+// RaptorDB — Entry Point (.NET 10)
+// Uses top-level statements (C# 9+) — no boilerplate class/Main needed.
+
+using RaptorDB.RaptorDB.Core;
 using RaptorDB.RaptorDB.REPL;
 
-namespace RaptorDB.RaptorDB
-{
-    internal class Program
-    {
-        static void Main()
-        {
-            var engine = new DBEngine();
-            var repl = new ReplShell(engine);
-            repl.Start();
-        }
-    }
-}
+var engine = new DBEngine();
+var repl = new ReplShell(engine);
+repl.Start();

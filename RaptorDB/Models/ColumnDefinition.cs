@@ -1,4 +1,4 @@
-﻿namespace RaptorDB.RaptorDB.Models
+namespace RaptorDB.RaptorDB.Models
 {
     internal enum DataType
     {
@@ -13,7 +13,7 @@
 
     internal class ColumnDefinition
     {
-        public string Name { get; set; }
+        public required string Name { get; set; }
         public DataType Type { get; set; }
         public bool IsPrimaryKey { get; set; }
 
