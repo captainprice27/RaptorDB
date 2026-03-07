@@ -541,6 +541,7 @@ When set, the engine prints:
 | **`OR` Conditions** | Support `WHERE col = x OR col = y` | 🔵 Planned |
 | **Multi-column `UPDATE`** | `UPDATE t SET a=1, b=2 WHERE ...` | 🔵 Planned |
 | **Network / TCP Mode** | Expose engine via socket for remote or GUI clients | 🔵 Planned |
+| **Cloud Deployment**   | Cloud-ready deployment (Azure/AWS) planned for v3.x | 🔵 Planned |
 | **CSV Import/Export** | `EXPORT table TO "file.csv"` / `IMPORT INTO table FROM "file.csv"` | 🔵 Planned |
 | **`LIST DATABASES`** | Show all available databases at the REPL | 🔵 Planned |
 | **`HELP` Command** | Built-in command reference in the REPL | 🔵 Planned |
