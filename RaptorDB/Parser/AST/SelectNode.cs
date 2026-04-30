@@ -8,11 +8,17 @@ namespace RaptorDB.RaptorDB.Parser.AST
         public List<string> Columns { get; }
         public List<Condition> Conditions { get; } // Supports multiple filters
 
-        public SelectNode(string tableName, List<string> columns, List<Condition> conditions)
+        // v2.0 — Optional JOIN clause(s), stored as a list to support
+        // chained joins:
+        //        SELECT ... FROM A JOIN B ON ... JOIN C ON ... [JOIN D ON ...]
+        public List<JoinClause> Joins { get; }
+
+        public SelectNode(string tableName, List<string> columns, List<Condition> conditions, List<JoinClause>? joins = null)
         {
             TableName = tableName;
             Columns = columns ?? new List<string>();
             Conditions = conditions ?? new List<Condition>();
+            Joins = joins ?? new List<JoinClause>();
         }
     }
 }

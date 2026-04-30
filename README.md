@@ -1,7 +1,9 @@
 # 🦖 RaptorDB
 
-> **Version 1.3** : A educational custom relational database engine built from scratch in C#.  
+> **Version 2.0** : A educational custom relational database engine built from scratch in C#.  
 > Locked and Loaded just like a F22 raptor🦖. © 2025–2026 Prayas ([@captainprice27](https://github.com/captainprice27))
+>
+> **What's new in v2.0:** `INNER JOIN`, `LEFT JOIN`, `RIGHT JOIN`, and chained / multi-table JOIN support via the Nested-Loop algorithm — see [Joining Tables](#8-joining-tables-v20) and [Version History](#-version-history).
 
 RaptorDB is a lightweight **Relational Database Management System (RDBMS)** designed to demonstrate advanced storage engine concepts. It features a custom SQL parser, a disk-based B+ Tree indexing engine, and an interactive REPL shell — all built **without any external database dependencies**.
 
@@ -22,10 +24,12 @@ RaptorDB is a lightweight **Relational Database Management System (RDBMS)** desi
   - [Querying Data (SELECT)](#5-querying-data)
   - [Updating Data](#6-updating-data)
   - [Deleting Data](#7-deleting-data)
+  - [Joining Tables (v2.0)](#8-joining-tables-v20)
 - [Architecture](#-architecture)
+- [Version History](#-version-history)
 - [File Formats](#-file-formats)
 - [Storage & Environment Config](#-storage--environment-config)
-- [Future Scope (v2.0)](#-future-scope-v20)
+- [Future Scope (v2.x+)](#-future-scope-v2x)
 - [Contributing](#-contributing)
 
 ---
@@ -43,6 +47,8 @@ RaptorDB is a lightweight **Relational Database Management System (RDBMS)** desi
 - **Logic Chaining** — Chain multiple `AND` conditions in a single `WHERE` clause
 - **Shorthand Syntax** — Unique syntax like `age > 18 AND < 25` (reuses column name)
 - **BETWEEN Support** — Syntactic sugar for range lookups (`BETWEEN x AND y`)
+- **JOIN Support (v2.0)** — `INNER`, `LEFT` and `RIGHT` joins via Nested-Loop, with qualified `table.column` references
+- **Chained / Multi-table JOINs (v2.0)** — `A JOIN B JOIN C JOIN D ...` in a single statement, mixing INNER / LEFT / RIGHT freely
 
 ### 🛡️ Data Integrity
 - **Base64 Serialization** — All row data is Base64-encoded per field to prevent delimiter injection attacks
@@ -425,9 +431,210 @@ DELETE FROM students;
 
 ---
 
+### 8. Joining Tables (v2.0)
+
+RaptorDB v2.0 supports three join types — `INNER JOIN`, `LEFT JOIN`, and `RIGHT JOIN` — implemented via the **Nested-Loop** algorithm.
+
+**Syntax:**
+```sql
+SELECT [* | col | table.col] [, ...]
+FROM   <left_table>
+[INNER | LEFT | RIGHT] JOIN <right_table>
+  ON   <left_table>.<col> = <right_table>.<col>
+[WHERE <conditions>];
+```
+
+> **About NULLs in RaptorDB:**
+> RaptorDB does **not** store NULLs — every column is type-validated on `INSERT` / `UPDATE`. This does **not** prevent `LEFT` / `RIGHT` joins, because joins are read-only projections. For unmatched rows, the missing side's columns are filled with the literal `<NULL>` placeholder **only in the `SELECT` output** — nothing is ever written to disk.
+
+#### Setup (used in all examples below)
+```sql
+CREATE TABLE students (
+    id   INT pk,
+    name STR
+);
+CREATE TABLE courses (
+    course_id  INT pk,
+    student_id INT,
+    title      STR
+);
+
+INSERT INTO students (id, name) VALUES (1, "Alice");
+INSERT INTO students (id, name) VALUES (2, "Bob");
+INSERT INTO students (id, name) VALUES (3, "Carol");
+
+INSERT INTO courses (course_id, student_id, title) VALUES (101, 1, "Algorithms");
+INSERT INTO courses (course_id, student_id, title) VALUES (102, 1, "Databases");
+INSERT INTO courses (course_id, student_id, title) VALUES (103, 2, "Networks");
+INSERT INTO courses (course_id, student_id, title) VALUES (104, 99, "Orphan Course");
+```
+
+#### `INNER JOIN`
+Returns only rows where the join key matches in **both** tables. A bare `JOIN` is treated as `INNER JOIN` (SQL standard).
+```sql
+SELECT * FROM students
+INNER JOIN courses ON students.id = courses.student_id;
+
+-- Equivalent shorthand:
+SELECT * FROM students JOIN courses ON students.id = courses.student_id;
+
+-- Project specific columns
+SELECT students.name, courses.title FROM students
+INNER JOIN courses ON students.id = courses.student_id;
+```
+
+#### `LEFT JOIN`
+Returns **all rows from the left table**; right-side columns become `<NULL>` when there is no match.
+```sql
+SELECT * FROM students
+LEFT JOIN courses ON students.id = courses.student_id;
+-- Carol (id=3) has no courses → her row's courses.* columns appear as <NULL>
+```
+
+#### `RIGHT JOIN`
+Returns **all rows from the right table**; left-side columns become `<NULL>` when there is no match.
+```sql
+SELECT * FROM students
+RIGHT JOIN courses ON students.id = courses.student_id;
+-- The "Orphan Course" (student_id=99) appears with students.* as <NULL>
+```
+
+#### JOIN + `WHERE`
+`WHERE` is applied **after** the join. References can be qualified or — when unambiguous — bare.
+```sql
+SELECT students.name, courses.title FROM students
+INNER JOIN courses ON students.id = courses.student_id
+WHERE students.id = 1;
+
+-- Bare column names work when only one side has that column
+SELECT * FROM students
+INNER JOIN courses ON students.id = courses.student_id
+WHERE title = "Databases";
+```
+
+> **Limitations:**
+> - The `ON` clause supports equi-joins only (`=`); range/composite predicates are not yet implemented.
+> - Multi-column projection (e.g. `SELECT a, b`) on **non-join** queries is still subject to the v1.3 single-column display limitation; for joined queries (any number of tables) it works as documented above.
+
+---
+
+#### Chained / Multi-table JOINs (v2.0)
+
+v2.0 also supports chained joins. You can chain any number of `JOIN ... ON ...` clauses in a single `SELECT`, and freely mix join types. Each `ON` clause can reference any table that appeared earlier in the chain (the `FROM` table or any previously-joined table).
+
+**Syntax:**
+```sql
+SELECT [* | col | table.col | table.*] [, ...]
+FROM   <t1>
+[INNER|LEFT|RIGHT] JOIN <t2> ON <expr1>
+[INNER|LEFT|RIGHT] JOIN <t3> ON <expr2>
+[INNER|LEFT|RIGHT] JOIN <t4> ON <expr3>
+...
+[WHERE <conditions>];
+```
+
+#### Setup (3-table chain)
+```sql
+CREATE TABLE students    (id INT pk, name STR);
+CREATE TABLE enrollments (enrol_id INT pk, student_id INT, course_id INT);
+CREATE TABLE courses     (course_id INT pk, title STR);
+
+INSERT INTO students    (id, name)                        VALUES (1, "Alice");
+INSERT INTO students    (id, name)                        VALUES (2, "Bob");
+INSERT INTO enrollments (enrol_id, student_id, course_id) VALUES (10, 1, 100);
+INSERT INTO enrollments (enrol_id, student_id, course_id) VALUES (11, 1, 101);
+INSERT INTO enrollments (enrol_id, student_id, course_id) VALUES (12, 2, 100);
+INSERT INTO courses     (course_id, title)                VALUES (100, "Algorithms");
+INSERT INTO courses     (course_id, title)                VALUES (101, "Databases");
+```
+
+#### Three-table INNER JOIN
+Resolve students → enrollments → courses to get "who is taking what":
+```sql
+SELECT students.name, courses.title
+FROM students
+INNER JOIN enrollments ON students.id        = enrollments.student_id
+INNER JOIN courses     ON enrollments.course_id = courses.course_id;
+```
+
+#### Mixing INNER + LEFT (4 tables)
+You can mix join types in a single chain. Each step is evaluated against the running result set:
+```sql
+SELECT students.name, courses.title, grades.letter
+FROM students
+INNER JOIN enrollments ON students.id        = enrollments.student_id
+INNER JOIN courses     ON enrollments.course_id = courses.course_id
+LEFT  JOIN grades      ON enrollments.enrol_id = grades.enrol_id;
+-- Students with no recorded grade still appear; grades.letter shows <NULL>.
+```
+
+#### Chained JOINs + WHERE
+The `WHERE` clause runs **after** all joins and can reference any table in the chain:
+```sql
+SELECT students.name, courses.title
+FROM students
+INNER JOIN enrollments ON students.id        = enrollments.student_id
+INNER JOIN courses     ON enrollments.course_id = courses.course_id
+WHERE students.id = 1;
+
+-- table.* shorthand also works for chained joins
+SELECT students.*, courses.title
+FROM students
+INNER JOIN enrollments ON students.id        = enrollments.student_id
+INNER JOIN courses     ON enrollments.course_id = courses.course_id
+WHERE courses.title = "Algorithms";
+```
+
+> **How it works under the hood:**
+> The execution engine performs an **iterative Nested-Loop** — it starts with the `FROM` table's rows (qualified as `table.column`), then for each `JOIN` clause it does a single Nested-Loop step against the new table and replaces the running result set. After all joins are resolved, the `WHERE` filter and column projection run against the fully-qualified rows.
+
+> **Limitations (v2.0):**
+> - `ON` is still equi-only (`=`).
+> - Each `JOIN` has its own `ON` clause directly after it (SQL standard ordering); composite `ON` predicates with `AND` are planned for a future release.
+
+---
+
 ## 🏗️ Architecture
 
-RaptorDB follows a clean **Separation of Concerns** pipeline:
+RaptorDB follows a clean **Separation of Concerns** pipeline. The diagram below grows **top-down** so each stage gets full-width labels and the storage fan-out at the bottom stays readable.
+
+```mermaid
+%%{init: {'theme':'dark','flowchart':{'nodeSpacing':50,'rankSpacing':60,'curve':'basis'},'themeVariables':{'fontSize':'18px','fontFamily':'Segoe UI, sans-serif'}}}%%
+flowchart TD
+    A(["<b>🖥️ USER INPUT &nbsp;—&nbsp; REPL Shell</b><br/><span style='font-size:14px'>raw SQL string typed at the prompt</span>"])
+    B(["<b>🔤 LEXER</b><br/><span style='font-size:14px'>Parser/Lexer.cs<br/>tokenizes SQL → List&lt;string&gt;</span>"])
+    C(["<b>🌳 PARSER</b><br/><span style='font-size:14px'>Parser/Parser.cs<br/>recursive-descent → AST</span>"])
+    D(["<b>🧩 AST NODES</b><br/><span style='font-size:14px'>Parser/AST/*.cs<br/>SelectNode, JoinClause, Condition, …</span>"])
+    E(["<b>⚙️ EXECUTION ENGINE</b><br/><span style='font-size:14px'>Core/ExecutionEngine.cs<br/>dispatches each AST node</span>"])
+    F(["<b>🔗 JOIN PLANNER (v2.0)</b><br/><span style='font-size:14px'>iterative Nested-Loop<br/>INNER / LEFT / RIGHT • chained</span>"])
+
+    S1(["<b>🗂️ SchemaManager</b><br/><span style='font-size:13px'>Storage/SchemaManager.cs<br/>reads/writes <code>.schema</code></span>"])
+    S2(["<b>📄 RecordManager</b><br/><span style='font-size:13px'>Storage/RecordManager.cs<br/>reads/writes <code>.data</code></span>"])
+    S3(["<b>🌲 IndexManager</b><br/><span style='font-size:13px'>Storage/IndexManager.cs<br/>B+ Tree <code>.bpt</code> / <code>.bpt64</code></span>"])
+    S4(["<b>📜 WALManager</b><br/><span style='font-size:13px'>Storage/WALManager.cs<br/>append-only <code>wal.log</code></span>"])
+
+    A --> B --> C --> D --> E
+    E --> F
+    E --> S1
+    E --> S2
+    E --> S3
+    E --> S4
+    F --> S1
+    F --> S2
+
+    classDef stage fill:#1e3a5f,stroke:#4fa3ff,stroke-width:2px,color:#ffffff
+    classDef ast   fill:#3d2b5e,stroke:#b48cff,stroke-width:2px,color:#ffffff
+    classDef join  fill:#5e3d2b,stroke:#ffb380,stroke-width:2px,color:#ffffff
+    classDef store fill:#2b5e3d,stroke:#80ffb3,stroke-width:2px,color:#ffffff
+
+    class A,B,C,E stage
+    class D ast
+    class F join
+    class S1,S2,S3,S4 store
+```
+
+<details>
+<summary><b>📜 Plain-text fallback (for environments that don't render Mermaid)</b></summary>
 
 ```
 User Input (REPL)
@@ -448,11 +655,14 @@ User Input (REPL)
   ExecutionEngine      (Core/ExecutionEngine.cs)
   Dispatches AST nodes to storage layer
      │
-     ├── SchemaManager  (Storage/SchemaManager.cs)  → reads/writes .schema files
-     ├── RecordManager  (Storage/RecordManager.cs)  → reads/writes .data files
-     ├── IndexManager   (Storage/IndexManager.cs)   → manages .bpt B+ Tree index
-     └── WALManager     (Storage/WALManager.cs)     → appends to wal.log
+     ├── JoinPlanner   (v2.0 INNER/LEFT/RIGHT + chained Nested-Loop)
+     ├── SchemaManager (Storage/SchemaManager.cs)  → reads/writes .schema files
+     ├── RecordManager (Storage/RecordManager.cs)  → reads/writes .data files
+     ├── IndexManager  (Storage/IndexManager.cs)   → manages .bpt B+ Tree index
+     └── WALManager    (Storage/WALManager.cs)     → appends to wal.log
 ```
+
+</details>
 
 ### Key Design Decisions
 
@@ -528,11 +738,26 @@ When set, the engine prints:
 
 ---
 
-## 🔮 Future Scope (v2.x)
+## 📜 Version History
+
+| Version | Highlights |
+|---|---|
+| **v2.0** *(current)* | ➕ `INNER JOIN`, `LEFT JOIN`, `RIGHT JOIN`, and **chained / multi-table JOINs** via Nested-Loop algorithm.<br>➕ Qualified column references (`table.column`) in `SELECT`, `WHERE` and `ON`.<br>➕ Each `ON` clause may reference **any previously-joined table**, not just the immediate predecessor.<br>➕ `<NULL>` output placeholder for unmatched rows in `LEFT` / `RIGHT` joins (output-only — nothing written to disk).<br>➕ `JoinClause` AST node + Parser support for `[INNER\|LEFT\|RIGHT] [OUTER] JOIN ... ON ...`.<br>➕ `SelectNode` now carries a `List<JoinClause>` so chained joins can be parsed and executed iteratively.<br>➕ Architecture diagram switched to **Mermaid (top-down)** for readable, large-text rendering. |
+| **v1.3** | ➕ Migration to **.NET 10** (multi-target with .NET 8).<br>➕ `BOOL` data type fully implemented in `Validators.cs`.<br>➕ Culture-invariant numeric parsing (no more locale-dependent FLOAT bugs).<br>➕ Span-based Base64 encode/decode in `ByteSerializer` for fewer allocations.<br>➕ `RAPTOR_DB_PATH` environment variable for portable / cloud-ready storage.<br>➕ Hardened nullable-reference flow in the Parser (`Require()` helper). |
+| **v1.2** | ➕ Disk-based **B+ Tree** index (`.bpt` / `.bpt64`) for primary keys with 4 KB paging.<br>➕ Duplicate-PK detection at `INSERT` time in O(log n).<br>➕ `WALManager` (`wal.log`) for append-only audit trail of every mutation.<br>➕ `LONG`, `DATE`, `DATETIME` allowed as primary keys. |
+| **v1.1** | ➕ Range operators (`>`, `<`, `>=`, `<=`, `!=`) and `BETWEEN x AND y`.<br>➕ Multiple chained `AND` conditions in `WHERE`.<br>➕ Shorthand `WHERE gpa > 3.0 AND < 4.0` (reuse previous column).<br>➕ Base64 per-field row encoding to prevent delimiter injection. |
+| **v1.0** | ➕ Initial release: REPL shell, custom Lexer + recursive-descent Parser.<br>➕ `CREATE/DROP DATABASE`, `USE`, `LIST TABLES`, `CREATE/DROP TABLE`.<br>➕ `INSERT`, `SELECT * / col`, equality `WHERE`, `UPDATE`, `DELETE`.<br>➕ Strict typed schema (`INT`, `LONG`, `FLOAT`, `STR`, `DATE`, `DATETIME`). |
+
+---
+
+## 🔮 Future Scope (v2.x+)
 
 | Feature | Description | Status |
 |---|---|---|
-| **JOIN Support** | `INNER JOIN` using Nested Loop algorithm | 🔵 Planned |
+| **JOIN Support** | `INNER`, `LEFT`, `RIGHT` joins via Nested-Loop | ✅ Done in v2.0 |
+| **Multi-table / chained JOINs** | `A JOIN B JOIN C ON ...` | ✅ Done in v2.0 |
+| **Composite `ON` predicates** | `ON a.x = b.x AND a.y = b.y` | 🔵 Planned |
+| **Non-equi JOINs** | Range / composite predicates in `ON` clause | 🔵 Planned |
 | **ACID Transactions** | `BEGIN`, `COMMIT`, `ROLLBACK` backed by the existing WAL | 🔵 Planned |
 | **Secondary Indexes** | `CREATE INDEX ON table(col)` for non-PK columns | 🔵 Planned |
 | **Query Optimizer** | Wire up `QueryPlanner.cs` to choose Index Seek vs. Full Scan | 🔵 Planned |

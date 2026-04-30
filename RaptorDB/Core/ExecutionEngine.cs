@@ -107,6 +107,11 @@ namespace RaptorDB.RaptorDB.Core
         // ---------------- SELECT ----------------
         private string ExecuteSelect(SelectNode node)
         {
+            // v2.0 — JOIN path is handled separately to keep the legacy
+            // single-table path identical to v1.3 behaviour. The JOIN path
+            // is taken whenever one or more joins are present.
+            if (node.Joins.Count > 0) return ExecuteSelectWithJoin(node);
+
             string table = Normalize(node.TableName);
             var rows = _records.ReadAll(table);
 
@@ -115,7 +120,361 @@ namespace RaptorDB.RaptorDB.Core
                 var schema = _schema.Load(table);
                 rows = rows.Where(r => MatchesAllConditions(r, node.Conditions, schema)).ToList();
             }
+
+            // Apply column projection if specific columns were requested.
+            if (node.Columns.Count > 0)
+                rows = ProjectColumns(rows, node.Columns);
+
             return Format(rows);
+        }
+
+        // ---------------- SELECT WITH JOIN (v2.0) ----------------
+        //
+        // v2.0 supports INNER / LEFT / RIGHT across both two-table and
+        // N-table chained join queries:
+        //
+        //     SELECT ... FROM A
+        //     INNER JOIN B ON A.x = B.x
+        //     LEFT  JOIN C ON B.y = C.y
+        //     RIGHT JOIN D ON A.z = D.z;
+        //
+        // Algorithm (iterative Nested-Loop):
+        //   1. Start with the FROM table's rows, qualified as "A.<col>".
+        //   2. For each JOIN clause in order, take the running result set as
+        //      the "left" side and the new table as the "right" side, then
+        //      perform a single-step Nested-Loop join. The output replaces
+        //      the running set so the next join can build on top of it.
+        //   3. After all joins are applied, the WHERE filter and column
+        //      projection run against fully-qualified rows.
+        //
+        // RaptorDB has no native NULL storage. For unmatched rows in
+        // LEFT/RIGHT joins, the missing side's columns are filled with the
+        // literal "<NULL>" placeholder in the output only.
+        private string ExecuteSelectWithJoin(SelectNode node)
+        {
+            string baseTable = Normalize(node.TableName);
+            var baseSchema = _schema.Load(baseTable);
+
+            // Track every schema seen so far so subsequent JOIN ... ON
+            // clauses can reference any previously-joined table.
+            var schemas = new Dictionary<string, TableSchema>(StringComparer.OrdinalIgnoreCase)
+            {
+                [baseTable] = baseSchema
+            };
+
+            // Prime the running result set with qualified keys.
+            var current = _records.ReadAll(baseTable)
+                .Select(r => QualifyRow(r, baseTable))
+                .ToList();
+
+            foreach (var join in node.Joins)
+            {
+                string rightTable = Normalize(join.TableName);
+                var rightSchema = _schema.Load(rightTable);
+                var rightRows = _records.ReadAll(rightTable);
+
+                // Resolve the ON clause to a (currentKey, rightCol) pair.
+                (string currentKey, string rightCol) =
+                    ResolveJoinKeys(join, schemas, rightTable, rightSchema);
+
+                current = ApplyJoinStep(
+                    current, schemas,
+                    rightRows, rightTable, rightSchema,
+                    currentKey, rightCol, join.Type);
+
+                schemas[rightTable] = rightSchema;
+            }
+
+            // Apply WHERE on joined rows (qualified-aware evaluator).
+            if (node.Conditions.Count > 0)
+            {
+                current = current.Where(jr =>
+                    MatchesAllConditionsJoined(jr, node.Conditions, schemas)).ToList();
+            }
+
+            // Apply projection — supports "*", "table.*", "table.col", "col".
+            if (node.Columns.Count > 0)
+                current = ProjectJoinedColumns(current, node.Columns, schemas);
+
+            return Format(current);
+        }
+
+        // ---------- JOIN HELPERS ----------
+
+        // Re-keys a raw row so all column names are qualified with the
+        // owning table (e.g. "id" → "students.id").
+        private static Dictionary<string, string> QualifyRow(
+            Dictionary<string, string> row, string table)
+        {
+            var qualified = new Dictionary<string, string>(row.Count);
+            foreach (var (k, v) in row) qualified[$"{table}.{k}"] = v;
+            return qualified;
+        }
+
+        // Performs a single Nested-Loop join step between the current
+        // (already-qualified) row set and one new right-hand table.
+        private static List<Dictionary<string, string>> ApplyJoinStep(
+            List<Dictionary<string, string>> current,
+            Dictionary<string, TableSchema> previousSchemas,
+            List<Dictionary<string, string>> rightRows,
+            string rightTable, TableSchema rightSchema,
+            string currentKey, string rightCol,
+            JoinType type)
+        {
+            var output = new List<Dictionary<string, string>>();
+
+            switch (type)
+            {
+                case JoinType.Inner:
+                    foreach (var l in current)
+                        foreach (var r in rightRows)
+                            if (l.TryGetValue(currentKey, out var lv) &&
+                                r.TryGetValue(rightCol, out var rv) &&
+                                lv == rv)
+                                output.Add(MergeJoined(l, r, rightTable));
+                    break;
+
+                case JoinType.Left:
+                    foreach (var l in current)
+                    {
+                        bool matched = false;
+                        foreach (var r in rightRows)
+                        {
+                            if (l.TryGetValue(currentKey, out var lv) &&
+                                r.TryGetValue(rightCol, out var rv) &&
+                                lv == rv)
+                            {
+                                output.Add(MergeJoined(l, r, rightTable));
+                                matched = true;
+                            }
+                        }
+                        if (!matched)
+                            output.Add(MergeJoined(l, null, rightTable, rightSchema));
+                    }
+                    break;
+
+                case JoinType.Right:
+                    foreach (var r in rightRows)
+                    {
+                        bool matched = false;
+                        foreach (var l in current)
+                        {
+                            if (l.TryGetValue(currentKey, out var lv) &&
+                                r.TryGetValue(rightCol, out var rv) &&
+                                lv == rv)
+                            {
+                                output.Add(MergeJoined(l, r, rightTable));
+                                matched = true;
+                            }
+                        }
+                        if (!matched)
+                        {
+                            // Build a "<NULL>" shell for every previously-
+                            // joined column so the output row shape stays uniform.
+                            var nullLeft = new Dictionary<string, string>();
+                            foreach (var (tbl, sch) in previousSchemas)
+                                foreach (var c in sch.Columns)
+                                    nullLeft[$"{tbl}.{c.Name}"] = "<NULL>";
+                            output.Add(MergeJoined(nullLeft, r, rightTable));
+                        }
+                    }
+                    break;
+            }
+
+            return output;
+        }
+
+        // Merges a left (already-qualified) row with a right (raw) row.
+        // If 'right' is null, 'rightSchema' must be supplied so missing
+        // columns can be filled with the "<NULL>" placeholder.
+        private static Dictionary<string, string> MergeJoined(
+            Dictionary<string, string> left,
+            Dictionary<string, string>? right, string rightTable,
+            TableSchema? rightSchema = null)
+        {
+            var merged = new Dictionary<string, string>(left);
+
+            if (right != null)
+            {
+                foreach (var (k, v) in right) merged[$"{rightTable}.{k}"] = v;
+            }
+            else if (rightSchema != null)
+            {
+                foreach (var c in rightSchema.Columns)
+                    merged[$"{rightTable}.{c.Name}"] = "<NULL>";
+            }
+
+            return merged;
+        }
+
+        // Resolves the two ON-clause column references for a single join
+        // step into a (currentKey, rightCol) pair, where currentKey is a
+        // fully-qualified key already present in the running result set
+        // and rightCol is an unqualified column name on the new table.
+        private static (string currentKey, string rightCol) ResolveJoinKeys(
+            JoinClause join,
+            Dictionary<string, TableSchema> previousSchemas,
+            string rightTable, TableSchema rightSchema)
+        {
+            var (aTable, aCol) = ParseRef(Normalize(join.LeftColumn),  previousSchemas, rightTable, rightSchema);
+            var (bTable, bCol) = ParseRef(Normalize(join.RightColumn), previousSchemas, rightTable, rightSchema);
+
+            bool aIsRight = aTable == rightTable;
+            bool bIsRight = bTable == rightTable;
+
+            if (aIsRight == bIsRight)
+                throw new Exception(
+                    $"JOIN ERROR: ON clause must reference one column from '{rightTable}' " +
+                    $"and one from a previously-joined table " +
+                    $"('{join.LeftColumn}' and '{join.RightColumn}' resolve to the same side).");
+
+            return aIsRight
+                ? ($"{bTable}.{bCol}", aCol)
+                : ($"{aTable}.{aCol}", bCol);
+        }
+
+        // Parses a (possibly-qualified) column reference and resolves it
+        // to (table, column). Errors on ambiguity or unknown columns.
+        private static (string table, string col) ParseRef(
+            string col,
+            Dictionary<string, TableSchema> previousSchemas,
+            string rightTable, TableSchema rightSchema)
+        {
+            int dot = col.IndexOf('.');
+            if (dot >= 0)
+            {
+                string tbl = col[..dot];
+                string c   = col[(dot + 1)..];
+                if (string.Equals(tbl, rightTable, StringComparison.OrdinalIgnoreCase) &&
+                    rightSchema.Columns.Any(x => x.Name == c))
+                    return (rightTable, c);
+                if (previousSchemas.TryGetValue(tbl, out var s) &&
+                    s.Columns.Any(x => x.Name == c))
+                    return (tbl, c);
+                throw new Exception($"JOIN ERROR: Unknown column '{col}'.");
+            }
+
+            var matches = new List<(string, string)>();
+            if (rightSchema.Columns.Any(x => x.Name == col)) matches.Add((rightTable, col));
+            foreach (var (t, sch) in previousSchemas)
+                if (sch.Columns.Any(x => x.Name == col)) matches.Add((t, col));
+
+            if (matches.Count == 0)
+                throw new Exception($"JOIN ERROR: Column '{col}' not found in any joined table.");
+            if (matches.Count > 1)
+                throw new Exception($"JOIN ERROR: Column '{col}' is ambiguous; qualify it as 'table.{col}'.");
+            return matches[0];
+        }
+
+        // WHERE evaluator for joined rows — supports both qualified
+        // ("students.id") and unqualified ("id") references across N tables.
+        private bool MatchesAllConditionsJoined(
+            Dictionary<string, string> row, List<Condition> conditions,
+            Dictionary<string, TableSchema> schemas)
+        {
+            if (conditions == null || conditions.Count == 0) return true;
+
+            foreach (var cond in conditions)
+            {
+                string col = Normalize(cond.Column);
+                string fullKey;
+                ColumnDefinition colDef;
+
+                if (col.Contains('.'))
+                {
+                    int dot = col.IndexOf('.');
+                    string tbl = col[..dot];
+                    string c   = col[(dot + 1)..];
+                    if (!schemas.TryGetValue(tbl, out var sch))
+                        throw new Exception($"Unknown table qualifier '{tbl}' in WHERE.");
+                    colDef = sch.Columns.FirstOrDefault(x => x.Name == c)
+                        ?? throw new Exception($"Column '{cond.Column}' not found.");
+                    fullKey = $"{tbl}.{c}";
+                }
+                else
+                {
+                    var matches = schemas
+                        .Where(kv => kv.Value.Columns.Any(x => x.Name == col))
+                        .Select(kv => kv.Key)
+                        .ToList();
+                    if (matches.Count == 0) return false;
+                    if (matches.Count > 1)
+                        throw new Exception($"Column '{col}' is ambiguous in joined query; qualify it.");
+                    string tbl = matches[0];
+                    fullKey = $"{tbl}.{col}";
+                    colDef  = schemas[tbl].Columns.First(x => x.Name == col);
+                }
+
+                if (!row.TryGetValue(fullKey, out var recordValue)) return false;
+                if (recordValue == "<NULL>") return false; // SQL-like: NULL never matches a predicate
+
+                if (!EvaluateSingle(recordValue, cond.Value, cond.Operator, colDef.Type))
+                    return false;
+            }
+            return true;
+        }
+
+        // Projects a list of joined rows down to the user-requested columns.
+        // Supports "*" (all), "table.*" (all of one side), "table.col"
+        // (qualified) and "col" (resolved by unique-match lookup across
+        // every joined table).
+        private static List<Dictionary<string, string>> ProjectJoinedColumns(
+            List<Dictionary<string, string>> rows, List<string> requested,
+            Dictionary<string, TableSchema> schemas)
+        {
+            var keys = new List<string>();
+            foreach (var raw in requested)
+            {
+                string c = Normalize(raw);
+
+                if (c.EndsWith(".*"))
+                {
+                    string tbl = c[..^2];
+                    if (!schemas.TryGetValue(tbl, out var sch))
+                        throw new Exception($"Unknown table qualifier '{tbl}.*' in SELECT.");
+                    foreach (var def in sch.Columns) keys.Add($"{tbl}.{def.Name}");
+                    continue;
+                }
+
+                if (c.Contains('.'))
+                {
+                    keys.Add(c);
+                    continue;
+                }
+
+                // Unqualified — must match exactly one joined table.
+                var matches = schemas
+                    .Where(kv => kv.Value.Columns.Any(x => x.Name == c))
+                    .Select(kv => kv.Key)
+                    .ToList();
+                if (matches.Count == 0)
+                    throw new Exception($"Column '{c}' not found in joined query.");
+                if (matches.Count > 1)
+                    throw new Exception($"Column '{c}' is ambiguous in joined query; qualify it.");
+                keys.Add($"{matches[0]}.{c}");
+            }
+
+            return rows.Select(r =>
+            {
+                var projected = new Dictionary<string, string>();
+                foreach (var k in keys)
+                    if (r.TryGetValue(k, out var v)) projected[k] = v;
+                return projected;
+            }).ToList();
+        }
+
+        // Single-table projection — used by the legacy non-join SELECT path.
+        private static List<Dictionary<string, string>> ProjectColumns(
+            List<Dictionary<string, string>> rows, List<string> requested)
+        {
+            var keys = requested.Select(Normalize).ToList();
+            return rows.Select(r =>
+            {
+                var projected = new Dictionary<string, string>();
+                foreach (var k in keys)
+                    if (r.TryGetValue(k, out var v)) projected[k] = v;
+                return projected;
+            }).ToList();
         }
 
         // ---------------- DELETE ----------------

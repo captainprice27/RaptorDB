@@ -51,8 +51,13 @@ namespace RaptorDB.RaptorDB.Parser
                     continue;
                 }
 
-                if ("(),+-*".Contains(current))
+                if ("(),+-*.".Contains(current))
                 {
+                    // '.' is emitted as its own token so qualified identifiers
+                    // like "students.id" can be assembled by the parser.
+                    // Numeric literals (e.g. 3.14) are handled by ReadNumberOrDate
+                    // below before we reach this branch, so '.' here is always
+                    // a qualifier separator.
                     tokens.Add(current.ToString());
                     _position++;
                     continue;

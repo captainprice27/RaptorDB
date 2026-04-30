@@ -10,9 +10,9 @@
     <Optimize>true</Optimize>
     <AssemblyName>RaptorDB</AssemblyName>
     <RootNamespace>RaptorDB</RootNamespace>
-    <AssemblyVersion>1.3.0.0</AssemblyVersion>
-    <FileVersion>1.3.0.0</FileVersion>
-    <Description>RaptorDB — Lightweight custom RDBMS engine built in C# (.NET 10)</Description>
+    <AssemblyVersion>2.0.0.0</AssemblyVersion>
+    <FileVersion>2.0.0.0</FileVersion>
+    <Description>RaptorDB — Lightweight custom RDBMS engine built in C# (.NET 10) — v2.0 adds INNER / LEFT / RIGHT and chained multi-table JOIN support</Description>
     <Authors>Prayas (@captainprice27)</Authors>
     <Copyright>© 2025-2026 Prayas</Copyright>
   </PropertyGroup>
