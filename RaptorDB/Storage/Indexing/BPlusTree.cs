@@ -91,6 +91,33 @@ namespace RaptorDB.RaptorDB.Storage.Indexing
             return default;
         }
 
+        /// <summary>
+        /// Walks the leaf-linked-list left-to-right and yields every key in
+        /// ascending order. Used by the Fenwick-Tree range-count accelerator
+        /// (see <see cref="FenwickTree"/>) to coordinate-compress the PK
+        /// space in a single O(n) pass.
+        /// </summary>
+        public IEnumerable<TKey> EnumerateKeysInOrder()
+        {
+            // Descend to the leftmost leaf.
+            var node = _disk.ReadNode(_rootPageId);
+            while (!node.IsLeaf)
+            {
+                if (node.Children.Count == 0) yield break;
+                node = _disk.ReadNode(node.Children[0]);
+            }
+
+            // Walk the leaf chain.
+            while (node != null)
+            {
+                foreach (var k in node.Keys)
+                    yield return k;
+
+                if (node.NextLeaf == -1) break;
+                node = _disk.ReadNode(node.NextLeaf);
+            }
+        }
+
         private void InsertNonFull(BPlusNode<TKey, TValue> node, TKey key, TValue value)
         {
             if (node.IsLeaf)

@@ -47,8 +47,21 @@ namespace RaptorDB.RaptorDB.Core
             // Future logic: Check if any column in node.Conditions has an index
             bool indexExists = false;
 
+            // Detect range predicates — these are the candidates accelerable
+            // by the Fenwick-Tree range-count primitive (see FenwickTree.cs
+            // and IndexManager.CountKeysInRange). Today the engine has no
+            // COUNT/SUM aggregates, so this is a plan-time annotation that
+            // surfaces *which* predicates a future aggregate path could
+            // resolve in O(log n) once wired up.
+            bool hasRangePredicate = node.Conditions.Any(c =>
+                c.Operator is ">" or "<" or ">=" or "<=");
+
             if (indexExists)
                 return $"PLAN: SELECT → USE_INDEX ON FILTERS: {filters}";
+
+            if (hasRangePredicate)
+                return $"PLAN: SELECT → FULL_SCAN WHERE {filters} " +
+                       "[hint: PK range eligible for FENWICK_RANGE_INDEX (O(log n))]";
 
             return $"PLAN: SELECT → FULL_SCAN WHERE {filters}";
         }

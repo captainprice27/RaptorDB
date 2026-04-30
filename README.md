@@ -26,6 +26,7 @@ RaptorDB is a lightweight **Relational Database Management System (RDBMS)** desi
   - [Deleting Data](#7-deleting-data)
   - [Joining Tables (v2.0)](#8-joining-tables-v20)
   - [Sorting Results — ORDER BY (v2.0)](#9-sorting-results--order-by-v20)
+  - [Fenwick-Tree Range-Count Accelerator (v2.0)](#10-fenwick-tree-range-count-accelerator-v20)
 - [Architecture](#-architecture)
 - [Version History](#-version-history)
 - [File Formats](#-file-formats)
@@ -40,6 +41,7 @@ RaptorDB is a lightweight **Relational Database Management System (RDBMS)** desi
 ### 🧠 Core Engine
 - **Custom Recursive Descent Parser** — Supports standard SQL syntax plus unique shorthand extensions
 - **B+ Tree Indexing** — Disk-based B+ Tree for Primary Keys (4 KB paging) for **O(log n)** lookups
+- **Fenwick-Tree Range Accelerator (v2.0)** — In-memory Binary Indexed Tree over the sorted PK keys answers PK-range cardinality (`count of PKs in [low, high]`) in **`O(log n)`** after an `O(n)` one-time build per table
 - **Typed Execution Engine** — Strictly enforces data types on every insert and update
 - **Portable Storage** — Automatically adapts storage paths (local dev vs. cloud/Azure via env variable)
 
@@ -652,6 +654,62 @@ ORDER BY students.name ASC, courses.title DESC;
 
 ---
 
+### 10. Fenwick-Tree Range-Count Accelerator (v2.0)
+
+v2.0 introduces a **Fenwick Tree (Binary Indexed Tree / BIT)** as a first-class building block in the storage layer — the canonical `O(log n)` primitive for **prefix-sum** and **range-sum / range-count** queries. It lives in `Storage/Indexing/FenwickTree.cs` and is wired into `IndexManager` as a lazy, per-table cache built over the sorted primary-key keys drained from the B+ Tree's leaf chain.
+
+> **Honest framing:** RaptorDB does not yet expose `COUNT(*)` / `SUM(...)` SQL aggregates, so this is intentionally a **storage-layer primitive + plan-time hint** rather than an end-user SQL feature. It's already callable from code and the `QueryPlanner` annotates eligible queries — once aggregates land, the wiring is one `if` away. Production engines reach the same goal with covering indexes, summary pages, or columnar precomputed aggregates; the Fenwick Tree is the *cleanest small-codebase* version of the same idea.
+
+#### Public API (storage layer)
+
+```csharp
+// IndexManager — returns count of PKs in [lowKey, highKey] for an INT or LONG/DATE/DATETIME indexed table.
+// Returns -1 when the index does not exist or the bounds cannot be parsed (caller falls back to full scan).
+long CountKeysInRange(string table, DataType type, string lowKey, string highKey);
+
+// FenwickTree — generic numeric BIT.
+FenwickTree.Build(long[] values);   // O(n) bulk construction
+ft.Update(int index, long delta);   // O(log n) point update (1-based)
+ft.PrefixSum(int index);            // O(log n) prefix sum
+ft.RangeSum(int left, int right);   // O(log n) inclusive range sum
+```
+
+#### How the PK range-count works
+
+1. On the **first** range query for a table after a mutation, `IndexManager` walks the B+ Tree leaf-linked-list once via `BPlusTree.EnumerateKeysInOrder()` → produces a sorted `long[]` of every existing PK (INT keys widen losslessly).
+2. A weight array of all-`1`s is fed into `FenwickTree.Build(...)` in `O(n)`.
+3. The `(sortedKeys, fenwick)` pair is cached, keyed by index-file path.
+4. Each subsequent `CountKeysInRange(low, high)` does:
+   - `lower_bound(low)` and `upper_bound(high)` over `sortedKeys` (`O(log n)`)
+   - one `FenwickTree.RangeSum(...)` call (`O(log n)`)
+5. Any `INSERT` (`AddIndexEntry`) or `DROP TABLE` / `DROP DATABASE` invalidates the cached entry, so answers stay correct.
+
+#### Complexity
+
+| Operation | Cost | Notes |
+|---|---|---|
+| First range-count after mutation | `O(n)` | One leaf-chain scan + Fenwick bulk-build |
+| Subsequent range-counts | `O(log n)` | Two binary searches + one Fenwick range query |
+| Memory | `O(n)` longs per cached table | Plain `long[]` + Fenwick array |
+| Cache invalidation | `O(1)` per `INSERT` / `DROP` | Drops the entry; next query rebuilds |
+
+#### Plan-time annotation
+
+`QueryPlanner.Plan(...)` now surfaces eligible queries with a `FENWICK_RANGE_INDEX` hint when the `WHERE` clause carries a range predicate (`>`, `<`, `>=`, `<=` — `BETWEEN` desugars to two such predicates):
+
+```text
+PLAN: SELECT → FULL_SCAN WHERE id > 100 AND id < 500
+              [hint: PK range eligible for FENWICK_RANGE_INDEX (O(log n))]
+```
+
+> **Limitations (v2.0):**
+> - The accelerator answers **count of PKs in range** only; `SUM` over arbitrary columns needs a separate Fenwick keyed by that column (deliberately deferred until secondary indexes land).
+> - The cache is **in-memory only** — it rebuilds after each process restart. The on-disk artefact stays the B+ Tree (`.bpt` / `.bpt64`).
+> - Cache invalidation is per-mutation; a heavy `INSERT` loop pays the rebuild cost on the next range query.
+> - There is no SQL surface yet (no `COUNT(*) WHERE pk BETWEEN ...`); the primitive is reachable from code and from `QueryPlanner` plan strings.
+
+---
+
 ## 🏗️ Architecture
 
 RaptorDB follows a clean **Separation of Concerns** pipeline. The diagram below grows **top-down** so each stage gets full-width labels and the storage fan-out at the bottom stays readable.
@@ -746,6 +804,8 @@ All data is stored as **plain files** in the active database folder (`Databases/
 | `.bpt64` | LONG/DATE/DATETIME PK index | Binary B+ Tree, 64-bit key variant |
 | `wal.log` | Write-Ahead Log | Append-only text: `timestamp\|ACTION\|table\|details` |
 
+> The Fenwick-Tree range-count cache (§10) is **in-memory only** — it has no on-disk artefact. The persistent index remains the B+ Tree (`.bpt` / `.bpt64`); the Fenwick layer is rebuilt lazily over its sorted keys.
+
 **Example `.schema` file** for a `students` table:
 ```
 id:INT:PK
@@ -800,7 +860,7 @@ When set, the engine prints:
 
 | Version | Highlights |
 |---|---|
-| **v2.0** *(current)* | ➕ `INNER JOIN`, `LEFT JOIN`, `RIGHT JOIN`, and **chained / multi-table JOINs** via Nested-Loop algorithm.<br>➕ Qualified column references (`table.column`) in `SELECT`, `WHERE` and `ON`.<br>➕ Each `ON` clause may reference **any previously-joined table**, not just the immediate predecessor.<br>➕ `<NULL>` output placeholder for unmatched rows in `LEFT` / `RIGHT` joins (output-only — nothing written to disk).<br>➕ `JoinClause` AST node + Parser support for `[INNER\|LEFT\|RIGHT] [OUTER] JOIN ... ON ...`.<br>➕ `SelectNode` now carries a `List<JoinClause>` so chained joins can be parsed and executed iteratively.<br>➕ **`ORDER BY` clause** with `ASC` / `DESC` and multi-key support (`ORDER BY a DESC, b ASC`); typed comparisons, stable merge sort (`O(n log n)` time / `O(n)` space), works on both single-table and joined queries.<br>➕ Architecture diagram switched to **Mermaid (top-down)** for readable, large-text rendering. |
+| **v2.0** *(current)* | ➕ `INNER JOIN`, `LEFT JOIN`, `RIGHT JOIN`, and **chained / multi-table JOINs** via Nested-Loop algorithm.<br>➕ Qualified column references (`table.column`) in `SELECT`, `WHERE` and `ON`.<br>➕ Each `ON` clause may reference **any previously-joined table**, not just the immediate predecessor.<br>➕ `<NULL>` output placeholder for unmatched rows in `LEFT` / `RIGHT` joins (output-only — nothing written to disk).<br>➕ `JoinClause` AST node + Parser support for `[INNER\|LEFT\|RIGHT] [OUTER] JOIN ... ON ...`.<br>➕ `SelectNode` now carries a `List<JoinClause>` so chained joins can be parsed and executed iteratively.<br>➕ **`ORDER BY` clause** with `ASC` / `DESC` and multi-key support (`ORDER BY a DESC, b ASC`); typed comparisons, stable merge sort (`O(n log n)` time / `O(n)` space), works on both single-table and joined queries.<br>➕ **Fenwick-Tree (Binary Indexed Tree) range-count accelerator** in `Storage/Indexing/FenwickTree.cs` — `O(log n)` PK range-cardinality queries via `IndexManager.CountKeysInRange(...)`, with a lazy per-table cache built over the B+ Tree leaf chain (`BPlusTree.EnumerateKeysInOrder()`) and invalidated on `INSERT` / `DROP`. Ready for upcoming `COUNT` / `SUM` aggregates.<br>➕ `QueryPlanner` annotates range-predicate plans with a `FENWICK_RANGE_INDEX` hint.<br>➕ Architecture diagram switched to **Mermaid (top-down)** for readable, large-text rendering. |
 | **v1.3** | ➕ Migration to **.NET 10** (multi-target with .NET 8).<br>➕ `BOOL` data type fully implemented in `Validators.cs`.<br>➕ Culture-invariant numeric parsing (no more locale-dependent FLOAT bugs).<br>➕ Span-based Base64 encode/decode in `ByteSerializer` for fewer allocations.<br>➕ `RAPTOR_DB_PATH` environment variable for portable / cloud-ready storage.<br>➕ Hardened nullable-reference flow in the Parser (`Require()` helper). |
 | **v1.2** | ➕ Disk-based **B+ Tree** index (`.bpt` / `.bpt64`) for primary keys with 4 KB paging.<br>➕ Duplicate-PK detection at `INSERT` time in O(log n).<br>➕ `WALManager` (`wal.log`) for append-only audit trail of every mutation.<br>➕ `LONG`, `DATE`, `DATETIME` allowed as primary keys. |
 | **v1.1** | ➕ Range operators (`>`, `<`, `>=`, `<=`, `!=`) and `BETWEEN x AND y`.<br>➕ Multiple chained `AND` conditions in `WHERE`.<br>➕ Shorthand `WHERE gpa > 3.0 AND < 4.0` (reuse previous column).<br>➕ Base64 per-field row encoding to prevent delimiter injection. |
@@ -818,7 +878,8 @@ When set, the engine prints:
 | **Non-equi JOINs** | Range / composite predicates in `ON` clause | 🔵 Planned |
 | **ACID Transactions** | `BEGIN`, `COMMIT`, `ROLLBACK` backed by the existing WAL | 🔵 Planned |
 | **Secondary Indexes** | `CREATE INDEX ON table(col)` for non-PK columns | 🔵 Planned |
-| **Query Optimizer** | Wire up `QueryPlanner.cs` to choose Index Seek vs. Full Scan | 🔵 Planned |
+| **Query Optimizer** | Wire up `QueryPlanner.cs` to choose Index Seek vs. Full Scan | 🟡 Partial — Fenwick range-count primitive landed in v2.0 (see [§10](#10-fenwick-tree-range-count-accelerator-v20)); cost-based plan selection still pending |
+| **Aggregates (`COUNT`, `SUM`, `AVG`, `MIN`, `MAX`)** | SQL-level aggregates; `COUNT` / `SUM` over PK ranges will reuse the v2.0 Fenwick accelerator | 🔵 Planned |
 | **`ORDER BY`** | Sort result set by any column, ASC or DESC | ✅ Done in v2.0 |
 | **`LIMIT`** | Restrict query result to top N rows | 🔵 Planned |
 | **`OR` Conditions** | Support `WHERE col = x OR col = y` | 🔵 Planned |

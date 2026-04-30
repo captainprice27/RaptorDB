@@ -72,6 +72,7 @@ RaptorDB uses the same *kinds* of artifacts the production engines use:
 | Schema metadata | `.schema` | data dictionary tables | `pg_catalog` |
 | Row data | `.data` (text, pipe-delimited Base64) | `.ibd` (paged binary) | heap files (paged binary) |
 | Primary-key index | `.bpt` / `.bpt64` (4 KB paged B+ Tree) | clustered B+ Tree | B-Tree (heap-organized) |
+| PK range-count accelerator | In-memory **Fenwick Tree** over sorted PK keys (`O(log n)`) | covering index + page-level summaries | covering index + visibility-map summaries |
 | Write-Ahead Log | `wal.log` (append-only text) | redo log (`ib_logfile`) | `pg_wal` |
 
 Same **concepts**, different fidelity.
@@ -153,7 +154,7 @@ This is a feature, not a flaw, for an **educational** engine — but it's why Ra
 
 ## ✨ 3. Things RaptorDB has that MySQL / Postgres do NOT
 
-These are the genuinely **distinctive** corners of the design. Most are consequences of being a small, hackable, single-binary engine.
+These are the genuinely **distinctive** corners of the design. Most are consequences of being a small, hackable, single-binary engine — plus, in v2.0, one genuinely unusual data-structure choice (the Fenwick Tree, §3.7).
 
 ### 3.1 Shorthand `WHERE ... AND <op> ...` syntax 🎯
 RaptorDB lets you reuse the previous column name when chaining range predicates:
@@ -196,7 +197,18 @@ RaptorDB is a **library + REPL**. You can import the assembly into a .NET app an
 
 There's no comparable mode for MySQL/Postgres (the closest analog is SQLite, which is a different engine entirely).
 
-### 3.7 Hackable in an afternoon
+### 3.7 Fenwick-Tree (BIT) range-count accelerator as a first-class storage primitive
+
+v2.0 ships a **Fenwick Tree** (Binary Indexed Tree) directly in the storage layer (`Storage/Indexing/FenwickTree.cs`), wired into `IndexManager.CountKeysInRange(...)`. After an `O(n)` lazy build over the sorted PK keys (drained from the B+ Tree's leaf chain via `BPlusTree.EnumerateKeysInOrder()`), every PK-range cardinality query runs in `O(log n)`. The cache is invalidated on `INSERT` and `DROP`.
+
+```text
+PLAN: SELECT → FULL_SCAN WHERE id > 100 AND id < 500
+              [hint: PK range eligible for FENWICK_RANGE_INDEX (O(log n))]
+```
+
+**Honest framing:** MySQL and PostgreSQL do not expose a Fenwick Tree as a user-visible structure — they reach the same goal *better*, with covering indexes, summary pages, and (in Postgres) the visibility map. What's distinctive about RaptorDB is **surfacing the textbook `O(log n)` primitive itself** in ~120 lines of readable C#, so a learner can read the entire range-query optimization technique end-to-end. That kind of pedagogical exposure is unique to a small, hackable engine.
+
+### 3.8 Hackable in an afternoon
 Because the entire engine is ~1.5 K lines of idiomatic C#, every feature added is easy to grok:
 
 - One file = Lexer
@@ -207,7 +219,7 @@ Because the entire engine is ~1.5 K lines of idiomatic C#, every feature added i
 
 You can add a new SQL keyword, trace it through the lexer/parser/AST/executor, and have it running end-to-end in a single sitting. Doing the same in MySQL or Postgres requires understanding their internal subsystems first.
 
-### 3.8 Built specifically for learning
+### 3.9 Built specifically for learning
 The codebase deliberately surfaces things production engines hide:
 
 - **Pipeline stages are 1:1 with named files** — `Lexer.cs`, `Parser.cs`, `ExecutionEngine.cs`, `BPlusTree.cs`, `WALManager.cs`. Everything maps to a textbook chapter.
@@ -263,6 +275,7 @@ The codebase deliberately surfaces things production engines hide:
 | Human-readable `.data` files | ✅ | ❌ | ❌ |
 | Single env-var relocation (`RAPTOR_DB_PATH`) | ✅ | ❌ | ❌ |
 | Embeddable as a .NET library | ✅ | ❌ | ❌ |
+| Fenwick-Tree (BIT) PK range-count primitive (storage-layer, `O(log n)`) | ✅ | ❌ (achieved via covering indexes) | ❌ (achieved via covering indexes + VM) |
 
 Legend: ✅ supported · ⚠️ partial / workaround · ❌ not supported
 
