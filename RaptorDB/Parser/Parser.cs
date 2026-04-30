@@ -204,7 +204,27 @@ namespace RaptorDB.RaptorDB.Parser
             var conditions = new List<Condition>();
             if (Match("where")) conditions = ParseWhereClause();
 
-            return new SelectNode(table, cols, conditions, joins);
+            // v2.0 — optional ORDER BY clause:
+            //   ORDER BY <col> [ASC|DESC] [, <col> [ASC|DESC]] ...
+            var orderBy = new List<OrderByItem>();
+            if (Match("order"))
+            {
+                Expect("by");
+                orderBy.Add(ParseOrderByItem());
+                while (Match(","))
+                    orderBy.Add(ParseOrderByItem());
+            }
+
+            return new SelectNode(table, cols, conditions, joins, orderBy);
+        }
+
+        private OrderByItem ParseOrderByItem()
+        {
+            string col = ReadQualifiedIdentifier("ORDER BY column name");
+            bool desc = false;
+            if (Match("desc"))      desc = true;
+            else if (Match("asc"))  desc = false;
+            return new OrderByItem(StripSemicolon(col), desc);
         }
 
         // ---------------------------------------------------------------

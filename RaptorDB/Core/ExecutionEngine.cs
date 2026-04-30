@@ -121,6 +121,13 @@ namespace RaptorDB.RaptorDB.Core
                 rows = rows.Where(r => MatchesAllConditions(r, node.Conditions, schema)).ToList();
             }
 
+            // v2.0 — ORDER BY (single-table path).
+            if (node.OrderBy.Count > 0)
+            {
+                var schema = _schema.Load(table);
+                rows = ApplyOrderBy(rows, node.OrderBy, schema);
+            }
+
             // Apply column projection if specific columns were requested.
             if (node.Columns.Count > 0)
                 rows = ProjectColumns(rows, node.Columns);
@@ -191,6 +198,10 @@ namespace RaptorDB.RaptorDB.Core
                 current = current.Where(jr =>
                     MatchesAllConditionsJoined(jr, node.Conditions, schemas)).ToList();
             }
+
+            // v2.0 — ORDER BY on joined rows (qualified-aware).
+            if (node.OrderBy.Count > 0)
+                current = ApplyOrderByJoined(current, node.OrderBy, schemas);
 
             // Apply projection — supports "*", "table.*", "table.col", "col".
             if (node.Columns.Count > 0)
@@ -475,6 +486,147 @@ namespace RaptorDB.RaptorDB.Core
                     if (r.TryGetValue(k, out var v)) projected[k] = v;
                 return projected;
             }).ToList();
+        }
+
+        // ---------------- ORDER BY (v2.0) ----------------
+        //
+        // RaptorDB delegates sorting to LINQ's OrderBy / ThenBy chain, which
+        // is implemented as a *stable* O(n log n) sort (an enumerable variant
+        // of merge-sort) inside the BCL. This means:
+        //
+        //   • Time complexity  : O(n log n) for n rows, k sort keys → O(k·n log n).
+        //   • Space complexity : O(n)       (the result set is materialised once).
+        //   • Stability        : equal-key rows preserve their original order,
+        //                        which is what makes multi-key ORDER BY
+        //                        (`ORDER BY a ASC, b DESC`) behave correctly.
+        //
+        // Comparisons are *typed* — INT/LONG are parsed as integers, FLOAT as
+        // double, DATE/DATETIME as DateTime, STR as ordinal-ignore-case — so
+        // "10" sorts after "9" (numeric) instead of before (lexical).
+        //
+        // Single-table path.
+        private static List<Dictionary<string, string>> ApplyOrderBy(
+            List<Dictionary<string, string>> rows,
+            List<OrderByItem> orderBy,
+            TableSchema schema)
+        {
+            IOrderedEnumerable<Dictionary<string, string>>? ordered = null;
+            for (int i = 0; i < orderBy.Count; i++)
+            {
+                var item = orderBy[i];
+                string col = Normalize(item.Column);
+                // Strip optional table qualifier (single-table path)
+                int dot = col.IndexOf('.');
+                if (dot >= 0) col = col[(dot + 1)..];
+
+                var def = schema.Columns.FirstOrDefault(c => c.Name == col)
+                    ?? throw new Exception($"ORDER BY column '{item.Column}' not found.");
+                var type = def.Type;
+                string keyName = col;
+
+                Comparer<Dictionary<string, string>> cmp = Comparer<Dictionary<string, string>>.Create(
+                    (a, b) => CompareTyped(
+                        a.TryGetValue(keyName, out var va) ? va : null,
+                        b.TryGetValue(keyName, out var vb) ? vb : null,
+                        type) * (item.Descending ? -1 : 1));
+
+                ordered = i == 0
+                    ? rows.OrderBy(r => r, cmp)
+                    : ordered!.ThenBy(r => r, cmp);
+            }
+            return ordered!.ToList();
+        }
+
+        // Joined / multi-table path — resolves qualified-vs-unqualified
+        // column refs the same way the WHERE evaluator does.
+        private static List<Dictionary<string, string>> ApplyOrderByJoined(
+            List<Dictionary<string, string>> rows,
+            List<OrderByItem> orderBy,
+            Dictionary<string, TableSchema> schemas)
+        {
+            IOrderedEnumerable<Dictionary<string, string>>? ordered = null;
+            for (int i = 0; i < orderBy.Count; i++)
+            {
+                var item = orderBy[i];
+                string raw = Normalize(item.Column);
+                string fullKey;
+                DataType type;
+
+                if (raw.Contains('.'))
+                {
+                    int dot = raw.IndexOf('.');
+                    string tbl = raw[..dot];
+                    string c   = raw[(dot + 1)..];
+                    if (!schemas.TryGetValue(tbl, out var sch))
+                        throw new Exception($"Unknown table qualifier '{tbl}' in ORDER BY.");
+                    var def = sch.Columns.FirstOrDefault(x => x.Name == c)
+                        ?? throw new Exception($"ORDER BY column '{item.Column}' not found.");
+                    fullKey = $"{tbl}.{c}";
+                    type    = def.Type;
+                }
+                else
+                {
+                    var matches = schemas
+                        .Where(kv => kv.Value.Columns.Any(x => x.Name == raw))
+                        .Select(kv => kv.Key)
+                        .ToList();
+                    if (matches.Count == 0)
+                        throw new Exception($"ORDER BY column '{raw}' not found in joined query.");
+                    if (matches.Count > 1)
+                        throw new Exception($"ORDER BY column '{raw}' is ambiguous; qualify it.");
+                    fullKey = $"{matches[0]}.{raw}";
+                    type    = schemas[matches[0]].Columns.First(x => x.Name == raw).Type;
+                }
+
+                string keyName = fullKey;
+                DataType keyType = type;
+                bool desc = item.Descending;
+
+                Comparer<Dictionary<string, string>> cmp = Comparer<Dictionary<string, string>>.Create(
+                    (a, b) => CompareTyped(
+                        a.TryGetValue(keyName, out var va) ? va : null,
+                        b.TryGetValue(keyName, out var vb) ? vb : null,
+                        keyType) * (desc ? -1 : 1));
+
+                ordered = i == 0
+                    ? rows.OrderBy(r => r, cmp)
+                    : ordered!.ThenBy(r => r, cmp);
+            }
+            return ordered!.ToList();
+        }
+
+        // Typed three-way comparison used by ORDER BY. "<NULL>" placeholders
+        // (from LEFT/RIGHT joins) and missing keys sort *last* — same as
+        // PostgreSQL's default `NULLS LAST` for ASC.
+        private static int CompareTyped(string? a, string? b, DataType type)
+        {
+            bool aNull = a is null || a == "<NULL>";
+            bool bNull = b is null || b == "<NULL>";
+            if (aNull && bNull) return 0;
+            if (aNull) return 1;
+            if (bNull) return -1;
+
+            switch (type)
+            {
+                case DataType.INT:
+                    if (int.TryParse(a, out var ai) && int.TryParse(b, out var bi))
+                        return ai.CompareTo(bi);
+                    break;
+                case DataType.LONG:
+                    if (long.TryParse(a, out var al) && long.TryParse(b, out var bl))
+                        return al.CompareTo(bl);
+                    break;
+                case DataType.FLOAT:
+                    if (double.TryParse(a, out var ad) && double.TryParse(b, out var bd))
+                        return ad.CompareTo(bd);
+                    break;
+                case DataType.DATE:
+                case DataType.DATETIME:
+                    if (DateTime.TryParse(a, out var adt) && DateTime.TryParse(b, out var bdt))
+                        return adt.CompareTo(bdt);
+                    break;
+            }
+            return string.Compare(a, b, StringComparison.OrdinalIgnoreCase);
         }
 
         // ---------------- DELETE ----------------

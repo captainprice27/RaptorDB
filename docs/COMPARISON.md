@@ -52,6 +52,7 @@ RaptorDB speaks recognizable SQL:
 | `INNER / LEFT / RIGHT JOIN` (v2.0) | ✅ | ✅ | ✅ |
 | **Chained / multi-table JOINs** (v2.0) | ✅ | ✅ | ✅ |
 | Qualified `table.column` references | ✅ | ✅ | ✅ |
+| `ORDER BY` with `ASC` / `DESC` + multi-key (v2.0) | ✅ | ✅ | ✅ |
 | Case-insensitive keywords | ✅ | ✅ | ⚠️ (identifiers fold lowercase) |
 
 ### 1.2 Engine architecture
@@ -105,7 +106,7 @@ This is the **honest gap list**. If a feature is here, MySQL/PostgreSQL have it 
 | Category | Missing in RaptorDB | MySQL / Postgres status |
 |---|---|---|
 | **Aggregation** | `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, `GROUP BY`, `HAVING` | ✅ Standard |
-| **Sorting / paging** | `ORDER BY`, `LIMIT`, `OFFSET` | ✅ Standard |
+| **Paging** | `LIMIT`, `OFFSET` *(`ORDER BY` ✅ added in v2.0 — see [§ Sorting in README](../README.md#9-sorting-results--order-by-v20))* | ✅ Standard |
 | **Boolean logic** | `OR`, `NOT`, parenthesised predicates | ✅ Standard |
 | **Subqueries** | Scalar, correlated, `IN (SELECT ...)`, `EXISTS` | ✅ Standard |
 | **CTEs / Window functions** | `WITH`, `ROW_NUMBER()`, `RANK()`, `LAG()` | ✅ Standard |
@@ -226,7 +227,8 @@ The codebase deliberately surfaces things production engines hide:
 | `AND` chaining | ✅ | ✅ | ✅ |
 | `OR` / `NOT` / parens | ❌ | ✅ | ✅ |
 | `LIKE` / pattern match | ❌ | ✅ | ✅ |
-| `ORDER BY`, `LIMIT`, `OFFSET` | ❌ | ✅ | ✅ |
+| `ORDER BY` (`ASC` / `DESC`, multi-key, stable sort) | ✅ | ✅ | ✅ |
+| `LIMIT`, `OFFSET` | ❌ | ✅ | ✅ |
 | `GROUP BY` / aggregates | ❌ | ✅ | ✅ |
 | Subqueries / CTEs / Window fns | ❌ | ✅ | ✅ |
 | **Joins** | | | |

@@ -25,6 +25,7 @@ RaptorDB is a lightweight **Relational Database Management System (RDBMS)** desi
   - [Updating Data](#6-updating-data)
   - [Deleting Data](#7-deleting-data)
   - [Joining Tables (v2.0)](#8-joining-tables-v20)
+  - [Sorting Results — ORDER BY (v2.0)](#9-sorting-results--order-by-v20)
 - [Architecture](#-architecture)
 - [Version History](#-version-history)
 - [File Formats](#-file-formats)
@@ -49,6 +50,7 @@ RaptorDB is a lightweight **Relational Database Management System (RDBMS)** desi
 - **BETWEEN Support** — Syntactic sugar for range lookups (`BETWEEN x AND y`)
 - **JOIN Support (v2.0)** — `INNER`, `LEFT` and `RIGHT` joins via Nested-Loop, with qualified `table.column` references
 - **Chained / Multi-table JOINs (v2.0)** — `A JOIN B JOIN C JOIN D ...` in a single statement, mixing INNER / LEFT / RIGHT freely
+- **`ORDER BY` (v2.0)** — Stable, typed multi-key sort (`ORDER BY col1 ASC, col2 DESC`), works on both single-table and joined queries
 
 ### 🛡️ Data Integrity
 - **Base64 Serialization** — All row data is Base64-encoded per field to prevent delimiter injection attacks
@@ -594,6 +596,62 @@ WHERE courses.title = "Algorithms";
 
 ---
 
+### 9. Sorting Results — `ORDER BY` (v2.0)
+
+RaptorDB v2.0 adds full `ORDER BY` support — **single or multi-key**, **`ASC` / `DESC`** per key, with **typed comparisons** (numbers sort numerically, dates chronologically, strings lexically).
+
+**Syntax:**
+```sql
+SELECT ... FROM <table>
+[WHERE <conditions>]
+ORDER BY <col1> [ASC|DESC] [, <col2> [ASC|DESC] ...];
+```
+
+If `ASC` / `DESC` is omitted, the default is **`ASC`** (SQL standard).
+
+#### Examples
+```sql
+-- Single-column sort, ascending (default)
+SELECT * FROM students ORDER BY gpa;
+
+-- Single-column sort, descending
+SELECT * FROM students ORDER BY gpa DESC;
+
+-- Multi-key sort: GPA descending, then name ascending as tie-breaker
+SELECT * FROM students ORDER BY gpa DESC, name ASC;
+
+-- Combine WHERE + ORDER BY
+SELECT * FROM students
+WHERE gpa >= 3.0
+ORDER BY dob ASC;
+
+-- Works with JOINs (qualified references, mix of tables)
+SELECT students.name, courses.title FROM students
+INNER JOIN courses ON students.id = courses.student_id
+ORDER BY students.name ASC, courses.title DESC;
+```
+
+> **NULL ordering:** `<NULL>` placeholders produced by `LEFT` / `RIGHT` joins always sort **last**, matching PostgreSQL's `NULLS LAST` default for `ASC`.
+
+#### Algorithm — Stable Merge Sort
+
+`ORDER BY` is implemented on top of LINQ's `OrderBy` / `ThenBy` chain, which the .NET BCL realises as a **stable comparison sort** based on **merge sort**.
+
+| Property | Value | Why it matters |
+|---|---|---|
+| **Time complexity** | **`O(n log n)`** in the average and worst case (`O(k · n log n)` for `k` sort keys) | Performance never degrades to quadratic, even on adversarial inputs |
+| **Space complexity** | **`O(n)`** — the result set is materialised into an array once and sorted in place | Memory grows linearly with row count |
+| **Stability** | ✅ Stable | Equal-key rows preserve their relative input order — this is what makes multi-key sort (`a ASC, b DESC`) behave correctly |
+| **Comparison kind** | Typed (`INT`, `LONG`, `FLOAT`, `DATE`, `DATETIME`, `STR`) | `"10"` sorts after `"9"` (numeric), not before (lexical) |
+
+> **Why merge sort over quicksort here?** RaptorDB needs **stability** for multi-key sort to work — running `ORDER BY b ASC` first and then `ORDER BY a ASC` only yields the desired (`a ASC, b ASC`) ordering when the second pass preserves the relative order of equal-`a` rows. Merge sort guarantees this; classical quicksort does not. The trade-off is `O(n)` extra memory, which is acceptable for an in-memory result set.
+
+> **Limitations (v2.0):**
+> - Sort runs on the materialised, post-`WHERE` result set — there is no index-based sort yet (a future B+ Tree-backed `ORDER BY` is planned).
+> - Sort happens **before** column projection, so you can `ORDER BY` a column that you didn't include in the `SELECT` list.
+
+---
+
 ## 🏗️ Architecture
 
 RaptorDB follows a clean **Separation of Concerns** pipeline. The diagram below grows **top-down** so each stage gets full-width labels and the storage fan-out at the bottom stays readable.
@@ -742,7 +800,7 @@ When set, the engine prints:
 
 | Version | Highlights |
 |---|---|
-| **v2.0** *(current)* | ➕ `INNER JOIN`, `LEFT JOIN`, `RIGHT JOIN`, and **chained / multi-table JOINs** via Nested-Loop algorithm.<br>➕ Qualified column references (`table.column`) in `SELECT`, `WHERE` and `ON`.<br>➕ Each `ON` clause may reference **any previously-joined table**, not just the immediate predecessor.<br>➕ `<NULL>` output placeholder for unmatched rows in `LEFT` / `RIGHT` joins (output-only — nothing written to disk).<br>➕ `JoinClause` AST node + Parser support for `[INNER\|LEFT\|RIGHT] [OUTER] JOIN ... ON ...`.<br>➕ `SelectNode` now carries a `List<JoinClause>` so chained joins can be parsed and executed iteratively.<br>➕ Architecture diagram switched to **Mermaid (top-down)** for readable, large-text rendering. |
+| **v2.0** *(current)* | ➕ `INNER JOIN`, `LEFT JOIN`, `RIGHT JOIN`, and **chained / multi-table JOINs** via Nested-Loop algorithm.<br>➕ Qualified column references (`table.column`) in `SELECT`, `WHERE` and `ON`.<br>➕ Each `ON` clause may reference **any previously-joined table**, not just the immediate predecessor.<br>➕ `<NULL>` output placeholder for unmatched rows in `LEFT` / `RIGHT` joins (output-only — nothing written to disk).<br>➕ `JoinClause` AST node + Parser support for `[INNER\|LEFT\|RIGHT] [OUTER] JOIN ... ON ...`.<br>➕ `SelectNode` now carries a `List<JoinClause>` so chained joins can be parsed and executed iteratively.<br>➕ **`ORDER BY` clause** with `ASC` / `DESC` and multi-key support (`ORDER BY a DESC, b ASC`); typed comparisons, stable merge sort (`O(n log n)` time / `O(n)` space), works on both single-table and joined queries.<br>➕ Architecture diagram switched to **Mermaid (top-down)** for readable, large-text rendering. |
 | **v1.3** | ➕ Migration to **.NET 10** (multi-target with .NET 8).<br>➕ `BOOL` data type fully implemented in `Validators.cs`.<br>➕ Culture-invariant numeric parsing (no more locale-dependent FLOAT bugs).<br>➕ Span-based Base64 encode/decode in `ByteSerializer` for fewer allocations.<br>➕ `RAPTOR_DB_PATH` environment variable for portable / cloud-ready storage.<br>➕ Hardened nullable-reference flow in the Parser (`Require()` helper). |
 | **v1.2** | ➕ Disk-based **B+ Tree** index (`.bpt` / `.bpt64`) for primary keys with 4 KB paging.<br>➕ Duplicate-PK detection at `INSERT` time in O(log n).<br>➕ `WALManager` (`wal.log`) for append-only audit trail of every mutation.<br>➕ `LONG`, `DATE`, `DATETIME` allowed as primary keys. |
 | **v1.1** | ➕ Range operators (`>`, `<`, `>=`, `<=`, `!=`) and `BETWEEN x AND y`.<br>➕ Multiple chained `AND` conditions in `WHERE`.<br>➕ Shorthand `WHERE gpa > 3.0 AND < 4.0` (reuse previous column).<br>➕ Base64 per-field row encoding to prevent delimiter injection. |
@@ -761,7 +819,7 @@ When set, the engine prints:
 | **ACID Transactions** | `BEGIN`, `COMMIT`, `ROLLBACK` backed by the existing WAL | 🔵 Planned |
 | **Secondary Indexes** | `CREATE INDEX ON table(col)` for non-PK columns | 🔵 Planned |
 | **Query Optimizer** | Wire up `QueryPlanner.cs` to choose Index Seek vs. Full Scan | 🔵 Planned |
-| **`ORDER BY`** | Sort result set by any column, ASC or DESC | 🔵 Planned |
+| **`ORDER BY`** | Sort result set by any column, ASC or DESC | ✅ Done in v2.0 |
 | **`LIMIT`** | Restrict query result to top N rows | 🔵 Planned |
 | **`OR` Conditions** | Support `WHERE col = x OR col = y` | 🔵 Planned |
 | **Multi-column `UPDATE`** | `UPDATE t SET a=1, b=2 WHERE ...` | 🔵 Planned |
